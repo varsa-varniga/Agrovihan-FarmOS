@@ -1,0 +1,1674 @@
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import pandas as pd
+import os
+import json
+import numpy as np
+import joblib
+
+
+
+
+# Relative imports from inside app
+from .utils.model_loader import load_all_models
+from .services.predict_service import predict_next_7_days, predict_next_months
+from .services.predict_yield import predict_yield_service
+# Initialize FastAPI
+app = FastAPI(title="AgroPulse Prediction API")
+
+
+
+
+def normalize(value, min_val, max_val):
+    if max_val == min_val:
+        return 0.5  # Avoid divide-by-zero; neutral score
+    return (value - min_val) / (max_val - min_val)
+
+
+
+
+#soil based recommendation
+# ==============================
+# Load Model and Encoders
+# ==============================
+MODEL_PATH = r"C:\Users\varsa\Agropulse\app\models\random_forest_crop_model.pkl"
+ENCODER_PATH = r"C:\Users\varsa\Agropulse\app\models\crop_recommendation.pkl"
+
+
+
+
+try:
+    crop_model = joblib.load(MODEL_PATH)
+    label_encoders = joblib.load(ENCODER_PATH)
+except Exception as e:
+    raise RuntimeError(f"Error loading model or encoders: {e}")
+
+
+
+
+
+
+
+
+# ==============================
+# Request Schema
+# ==============================
+class SoilCropRequest(BaseModel):
+    soil_type: str
+    soil_moisture: float
+    soil_ph: float
+    N: float
+    P: float
+    K: float
+    organic_carbon: float
+    texture: str
+    drainage: str
+    soil_health_index: float
+    previous_crop: str
+    acres: float
+
+
+
+
+
+
+
+
+# ==============================
+# Helper Functions
+# ==============================
+def safe_encode(encoder, value: str):
+    """Encode categorical value safely using a LabelEncoder."""
+    value = value.strip().lower()
+    classes = [cls.lower() for cls in encoder.classes_]
+    if value in classes:
+        idx = classes.index(value)
+        return encoder.transform([encoder.classes_[idx]])[0]
+    else:
+        # Unknown value: default to first known class
+        return encoder.transform([encoder.classes_[0]])[0]
+
+
+
+
+
+
+
+
+def preprocess_input(data, encoders):
+    """Encode all categorical columns and keep numeric as is."""
+    processed = []
+    for feature in [
+        "soil_type", "soil_moisture", "soil_ph", "N", "P", "K",
+        "organic_carbon", "texture", "drainage",
+        "soil_health_index", "previous_crop", "acres"
+    ]:
+        value = data[feature]
+        if feature in encoders:
+            encoded_value = safe_encode(encoders[feature], str(value))
+            processed.append(encoded_value)
+        else:
+            processed.append(float(value))
+    return np.array(processed).reshape(1, -1)
+
+
+
+
+
+
+
+
+# ==============================
+# Endpoint — Top 3 Crops
+# ==============================
+@app.post("/api/soil_score/")
+def get_soil_score(request: SoilCropRequest):
+    try:
+        input_data = request.dict()
+        X = preprocess_input(input_data, label_encoders)
+
+
+
+
+        # Predict probabilities for all crops
+        probabilities = crop_model.predict_proba(X)[0]
+
+
+
+
+        # Get encoded crop labels
+        encoded_labels = crop_model.classes_
+
+
+
+
+        # Decode crop names using the correct encoder
+        crop_names = label_encoders["recommended_crop"].inverse_transform(encoded_labels)
+
+
+
+
+        # Pair crops with probabilities
+        crop_scores = list(zip(crop_names, probabilities))
+
+
+
+
+        # Sort by score descending
+        sorted_crops = sorted(crop_scores, key=lambda x: x[1], reverse=True)
+
+
+
+
+        # Top 3
+        top_3 = sorted_crops[:3]
+
+
+
+
+        # Format response
+        result = [{"crop": crop, "score": round(float(score), 3)} for crop, score in top_3]
+
+
+
+
+        return {"recommended_crops": result, "status": "success"}
+
+
+
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Soil suitability scoring failed: {e}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# =====================================================
+# 🌦 Climate & Weather Suitability Model Endpoint
+# =====================================================
+import os
+import numpy as np
+import joblib
+from fastapi import HTTPException
+from pydantic import BaseModel
+
+
+
+
+# ==============================
+# Load Model and Encoders
+# ==============================
+MODEL_DIR = r"C:\Users\varsa\Agropulse\app\models"
+
+
+
+
+try:
+    gbr_model = joblib.load(os.path.join(MODEL_DIR, "gbr_crop_suitability.pkl"))
+    scaler = joblib.load(os.path.join(MODEL_DIR, "feature_scaler.pkl"))
+    ohe_season = joblib.load(os.path.join(MODEL_DIR, "season_ohe.pkl"))
+    le_season = joblib.load(os.path.join(MODEL_DIR, "season_encoder.pkl"))
+    print("✅ Climate suitability model loaded successfully!")
+except Exception as e:
+    raise RuntimeError(f"Error loading model or encoders: {e}")
+
+
+
+
+# ==============================
+# Crop–Season Mapping
+# ==============================
+target_crops = [
+    'paddy', 'maize', 'tur dal', 'green gram', 'tomato',
+    'onion', 'sugarcane', 'banana', 'coconut', 'groundnut'
+]
+
+
+
+
+crop_season_map = {
+    'paddy': 'kharif', 'maize': 'kharif', 'tur dal': 'rabi', 'green gram': 'rabi',
+    'tomato': 'summer', 'onion': 'rabi', 'sugarcane': 'year-round',
+    'banana': 'year-round', 'coconut': 'year-round', 'groundnut': 'kharif'
+}
+
+
+
+
+# ==============================
+# Request Schema
+# ==============================
+class ClimateRequest(BaseModel):
+    temperature: float
+    humidity: float
+    ph: float
+    rainfall: float
+
+
+
+
+# ==============================
+# Helper Function
+# ==============================
+def predict_all_crops_normalized(input_features: dict):
+    results = {}
+
+
+
+
+    for crop in target_crops:
+        try:
+            season_int = le_season.transform([crop_season_map[crop]])[0]
+            season_ohe_vec = ohe_season.transform([[season_int]])
+        except Exception:
+            continue
+
+
+
+
+        temp_array = np.hstack([
+            np.array([[input_features["temperature"],
+                       input_features["humidity"],
+                       input_features["ph"],
+                       input_features["rainfall"]]]),
+            season_ohe_vec
+        ])
+
+
+
+
+        temp_scaled = scaler.transform(temp_array)
+        score = gbr_model.predict(temp_scaled)[0]
+        results[crop] = max(0, score)
+
+
+
+
+    total = sum(results.values())
+    normalized_scores = {c: (s / total if total > 0 else 0) for c, s in results.items()}
+    return dict(sorted(normalized_scores.items(), key=lambda x: x[1], reverse=True))
+
+
+
+
+# ==============================
+# 🌾 Endpoint — Top 3 Crops
+# ==============================
+@app.post("/api/climate_suitability/")
+def get_climate_suitability(request: ClimateRequest):
+    try:
+        input_data = request.dict()
+        predictions = predict_all_crops_normalized(input_data)
+
+
+
+
+        # Top 3 crops
+        top_3 = list(predictions.items())[:3]
+        #result = [{"crop": crop, "score": round(float(score) * 100, 1)} for crop, score in top_3] scores :/10
+
+
+
+
+        result = [{"crop": crop, "score": round(float(score), 3)} for crop, score in top_3]
+
+
+
+
+        return {
+            "recommended_crops": result,
+            "status": "success"
+        }
+
+
+
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Climate suitability scoring failed: {e}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# -----------------------------
+# Paths
+# -----------------------------
+MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")  # app/models
+PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))  # one level up from app/
+DAILY_DIR = os.path.join(PROJECT_ROOT, "notebooks", "data", "processed", "crop_daily_avg")
+MONTHLY_DIR = os.path.join(PROJECT_ROOT, "notebooks", "data", "processed", "crop_monthly_avg")
+print("DAILY_DIR:", DAILY_DIR)
+print("MONTHLY_DIR:", MONTHLY_DIR)
+
+
+
+
+
+
+
+
+# -----------------------------
+# Load all models at startup
+# -----------------------------
+models = load_all_models(MODEL_DIR)
+print(f"✅ Loaded models: {list(models.keys())}")
+
+
+
+
+
+
+
+
+# ==============================
+# Endpoint 1: Next 7 days (daily)
+# ==============================
+@app.post("/predict_next_week")
+def predict_next_week(commodity: str):
+    commodity = commodity.lower()
+    model_key = f"{commodity}_lstm"  # daily model key
+
+
+
+
+    if model_key not in models:
+        raise HTTPException(status_code=404, detail=f"No daily model found for {commodity}")
+
+
+
+
+    csv_file = os.path.join(DAILY_DIR, f"{commodity}_daily.csv")
+    if not os.path.exists(csv_file):
+        raise HTTPException(status_code=404, detail=f"Daily CSV not found for {commodity}")
+
+
+
+
+    df = pd.read_csv(csv_file)
+
+
+
+
+    if "price_modal" not in df.columns:
+        raise HTTPException(status_code=400, detail=f"'price_modal' column missing in daily CSV for {commodity}")
+
+
+
+
+    forecast_df = predict_next_7_days(models[model_key]['model'], models[model_key]['scaler'], df)
+
+
+
+
+    return {
+        "commodity": commodity,
+        "next_7_days": forecast_df.to_dict(orient="records")
+    }
+
+
+
+
+# ==============================
+# Endpoint 3: Normalized Market Score (Next 3–6 Months)
+# ==============================
+@app.post("/market_score_monthly")
+def market_score_monthly(commodity: str, months: int = 3):
+    commodity = commodity.lower()
+    model_key = f"{commodity}_monthly_lstm"  # monthly model key
+
+
+
+
+    if model_key not in models:
+        raise HTTPException(status_code=404, detail=f"No monthly model found for {commodity}")
+
+
+
+
+    csv_file = os.path.join(MONTHLY_DIR, f"{commodity}_monthly.csv")
+    if not os.path.exists(csv_file):
+        raise HTTPException(status_code=404, detail=f"Monthly CSV not found for {commodity}")
+
+
+
+
+    df = pd.read_csv(csv_file)
+    if "month" not in df.columns or "price_modal" not in df.columns:
+        raise HTTPException(status_code=400, detail=f"'month' or 'price_modal' column missing in monthly CSV for {commodity}")
+
+
+
+
+    df['month'] = pd.to_datetime(df['month'], errors='coerce')
+    df = df.sort_values('month')
+
+
+
+
+    model_info = models[model_key]
+    model = model_info['model']
+    scaler = model_info['scaler']
+
+
+
+
+    window_size = model.input_shape[1]
+    if len(df) < window_size:
+        raise HTTPException(status_code=400, detail="Not enough monthly data to predict")
+
+
+
+
+    last_sequence = df['price_modal'].values[-window_size:]
+    predicted_prices = predict_next_months(model, scaler, last_sequence, forecast_horizon=months)
+
+
+
+
+    # Step 1: Compute metrics
+    avg_price = float(np.mean(predicted_prices))
+    volatility = float(np.std(predicted_prices))
+
+
+
+
+    # Step 2: Normalize to 0–1 scale
+    # You can adjust these min/max values dynamically or keep as global constants
+    MIN_PRICE, MAX_PRICE = 10, 200     # depends on your commodity range
+    MAX_VOLATILITY = 30                # max expected std deviation
+
+
+
+
+    def normalize(value, min_val, max_val):
+        if max_val == min_val:
+            return 0.5
+        return (value - min_val) / (max_val - min_val)
+
+
+
+
+    price_norm = normalize(avg_price, MIN_PRICE, MAX_PRICE)
+    volatility_norm = 1 - normalize(volatility, 0, MAX_VOLATILITY)
+
+
+
+
+    # Step 3: Weighted final score
+    market_score = round((0.7 * price_norm + 0.3 * volatility_norm), 3)
+
+
+
+
+    return {
+        "commodity": commodity,
+        "forecast_horizon_months": months,
+        "average_price": round(avg_price, 2),
+        "volatility": round(volatility, 2),
+        "market_score": market_score
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+# Define request schema with lowercase keys
+class YieldRequest(BaseModel):
+    location: str
+    crop: str
+    climate_suitability_score: float
+    soil_fitness_score: float
+    previous_crop: str
+    previous_yield: float
+    irrigation_method: str
+    planting_density: float
+    ndvi: float
+    evi: float
+    lai: float
+
+
+
+
+# ==============================
+# Endpoint: Predict Yield Score
+# ==============================
+@app.post("/api/predict_yield/")
+def predict_yield(request: YieldRequest):
+    """
+    Predicts yield (kg/ha) and converts it into a normalized yield score (0–1)
+    """
+    data = request.dict()
+    predicted_yield = predict_yield_service(data)
+
+
+
+
+    # Define your expected yield range — adjust these to match your region
+    MIN_YIELD, MAX_YIELD = 500, 8000  # kg/ha range for normalization
+    yield_score = round(normalize(predicted_yield, MIN_YIELD, MAX_YIELD), 3)
+
+
+
+
+    return {
+        "crop": data["crop"],
+        "predicted_yield_kg_ha": predicted_yield,
+        "yield_score": yield_score
+    }
+
+
+
+
+# ==============================
+# Endpoint 4: Financial picture / ROI using 3-month market forecast
+# ==============================
+@app.post("/predict_financials/")
+def calculate_financials(request: YieldRequest):
+    data = request.dict()
+    crop = data["crop"].capitalize()  # match JSON keys
+    acres = data.get("acres", 2.5)  # default 2.5 acres
+
+
+
+
+    # 0️⃣ Load crop cost data from JSON
+    COST_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "app", "data", "crop_costs.json")
+    if not os.path.exists(COST_FILE):
+        raise HTTPException(status_code=404, detail="Crop cost file not found")
+    with open(COST_FILE, "r") as f:
+        raw_cost_data = json.load(f).get(crop)
+    if not raw_cost_data:
+        raise HTTPException(status_code=404, detail=f"No cost data found for {crop}")
+
+
+
+
+    # 1️⃣ Predict yield (kg/ha)
+    predicted_yield_kg_ha = predict_yield_service(data)
+
+
+
+
+    # 2️⃣ Friendly cost labels
+    COST_LABELS = {
+        "seed_cost": "Seeds",
+        "fertilizer_cost": "Organic manure & bio-fertilizer",
+        "irrigation_cost": "Irrigation (canal + motor)",
+        "labour_cost": "Labour",
+        "transportation_cost": "Transport & Mandi fees",
+        "equipment_cost": "Equipment"
+    }
+    cost_data = {COST_LABELS.get(k, k): v for k, v in raw_cost_data.items()}
+    total_cost_per_acre = sum(cost_data.values())
+    total_cost_field = total_cost_per_acre * acres
+
+
+
+
+    # 3️⃣ Market price forecast (next 3 months)
+    model_key = f"{crop.lower()}_monthly_lstm"
+    monthly_csv = os.path.join(MONTHLY_DIR, f"{crop.lower()}_monthly.csv")
+
+
+
+
+    if model_key not in models or not os.path.exists(monthly_csv):
+        raise HTTPException(status_code=404, detail="Monthly price prediction data not found")
+
+
+
+
+    df_price = pd.read_csv(monthly_csv)
+    df_price['month'] = pd.to_datetime(df_price['month'], errors='coerce')
+    df_price = df_price.sort_values('month')
+
+
+
+
+    model_info = models[model_key]
+    model = model_info['model']
+    scaler = model_info['scaler']
+    window_size = model.input_shape[1]
+    last_sequence = df_price['price_modal'].values[-window_size:]
+    predicted_prices = predict_next_months(model, scaler, last_sequence, forecast_horizon=3)
+    market_price_per_kg = sum(predicted_prices) / len(predicted_prices)  # average
+
+
+
+
+    # 4️⃣ Convert yield
+    predicted_yield_kg_per_acre = predicted_yield_kg_ha / 2.471  # kg per acre
+    predicted_yield_kg_field = predicted_yield_kg_per_acre * acres  # total kg for field
+
+
+
+
+    predicted_yield_quintals_per_acre = predicted_yield_kg_per_acre / 100
+    predicted_yield_quintals_field = predicted_yield_kg_field / 100
+
+
+
+
+    # 5️⃣ Revenue, profit, ROI
+    revenue = predicted_yield_kg_field * market_price_per_kg
+    profit = revenue - total_cost_field
+    roi_percent = (profit / total_cost_field) * 100
+
+
+
+
+    # 6️⃣ Prepare output
+    financials = {
+        "Your financial picture": {
+            "Expense per acre": {k: f"₹{v:,.0f}" for k, v in cost_data.items()},
+            "Total Cost per acre": f"₹{total_cost_per_acre:,.0f}",
+            "Total Cost for field": f"₹{total_cost_field:,.0f}",
+            "Expected Yield per hectare": f"{predicted_yield_kg_ha / 100:,.1f} quintals",
+            "Expected Yield per acre": f"{predicted_yield_quintals_per_acre:,.1f} quintals",
+            "Expected Yield for field": f"{predicted_yield_quintals_field:,.1f} quintals",
+            "Market Price (avg 3 months)": f"₹{market_price_per_kg:,.0f} per kg",
+            "Expected Revenue": f"₹{revenue:,.0f}",
+            "Net Profit": f"₹{profit:,.0f} (~{roi_percent:,.0f}% ROI)"
+        }
+    }
+
+
+
+
+    return financials
+
+# ==============================
+# Endpoint: Final Recommendation
+# ==============================
+class FinalRequest(BaseModel):
+    soil_type: str
+    soil_moisture: float
+    soil_ph: float
+    N: float
+    P: float
+    K: float
+    organic_carbon: float
+    texture: str
+    drainage: str
+    soil_health_index: float
+    previous_crop: str
+    acres: float
+    temperature: float
+    humidity: float
+    ph: float
+    rainfall: float
+    location: str
+    irrigation_method: str
+    planting_density: float
+    ndvi: float
+    evi: float
+    lai: float
+
+@app.post("/api/final_recommendation/")
+def final_recommendation(request: FinalRequest):
+    try:
+        data = request.dict()
+        
+        # 1️⃣ Get top 3 crops from soil model
+        X = preprocess_input(data, label_encoders)
+        probabilities = crop_model.predict_proba(X)[0]
+        crop_names = label_encoders["recommended_crop"].inverse_transform(crop_model.classes_)
+        crop_scores = list(zip(crop_names, probabilities))
+        top_crops = sorted(crop_scores, key=lambda x: x[1], reverse=True)[:3]
+
+        final_results = []
+
+        for crop, soil_score in top_crops:
+            # ---- Climate score ----
+            climate_preds = predict_all_crops_normalized({
+                "temperature": data["temperature"],
+                "humidity": data["humidity"],
+                "ph": data["ph"],
+                "rainfall": data["rainfall"]
+            })
+            climate_score = climate_preds.get(crop, 0)
+
+            # ---- Yield score ----
+            yield_kg_ha = predict_yield_service({
+                "location": data["location"],
+                "crop": crop,
+                "climate_suitability_score": climate_score,
+                "soil_fitness_score": soil_score,
+                "previous_crop": data["previous_crop"],
+                "previous_yield": 0,
+                "irrigation_method": data["irrigation_method"],
+                "planting_density": data["planting_density"],
+                "ndvi": data["ndvi"],
+                "evi": data["evi"],
+                "lai": data["lai"]
+            })
+            yield_score = normalize(yield_kg_ha, 500, 8000)
+
+            # ---- Market score ----
+            model_key = f"{crop.lower()}_monthly_lstm"
+            monthly_csv = os.path.join(MONTHLY_DIR, f"{crop.lower()}_monthly.csv")
+            if model_key in models and os.path.exists(monthly_csv):
+                df_price = pd.read_csv(monthly_csv).sort_values('month')
+                last_seq = df_price['price_modal'].values[-models[model_key]['model'].input_shape[1]:]
+                predicted_prices = predict_next_months(models[model_key]['model'], models[model_key]['scaler'], last_seq, forecast_horizon=3)
+                avg_price = float(np.mean(predicted_prices))
+                market_score = normalize(avg_price, 10, 200)
+            else:
+                market_score = 0
+
+            # ---- ROI score ----
+            crop_cost_data = json.load(open(os.path.join(os.path.dirname(os.path.dirname(__file__)), "app", "data", "crop_costs.json"), "r")).get(crop.capitalize())
+            if crop_cost_data:
+                total_cost_per_acre = sum(crop_cost_data.values())
+                predicted_yield_kg_per_acre = yield_kg_ha / 2.471
+                predicted_yield_kg_field = predicted_yield_kg_per_acre * data["acres"]
+                market_price_per_kg = avg_price if 'avg_price' in locals() else 0
+                revenue = predicted_yield_kg_field * market_price_per_kg
+                profit = revenue - total_cost_per_acre * data["acres"]
+                roi_score = normalize(profit, 0, revenue*2)
+            else:
+                roi_score = 0
+
+            # ---- Final weighted score ----
+            final_score = round(0.25*soil_score + 0.25*climate_score + 0.25*yield_score + 0.125*market_score + 0.125*roi_score, 3)
+
+            final_results.append({
+                "crop": crop,
+                "soil_score": round(soil_score, 3),
+                "climate_score": round(climate_score, 3),
+                "yield_score": round(yield_score, 3),
+                "market_score": round(market_score, 3),
+                "roi_score": round(roi_score, 3),
+                "final_score": final_score
+            })
+
+        # Sort by final score descending
+        final_results = sorted(final_results, key=lambda x: x["final_score"], reverse=True)
+
+        return {"recommended_crops": final_results, "status": "success"}
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Final recommendation failed: {e}")
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import pandas as pd
+import os
+import json
+import numpy as np
+import joblib
+
+
+
+
+# Relative imports from inside app
+from .utils.model_loader import load_all_models
+from .services.predict_service import predict_next_7_days, predict_next_months
+from .services.predict_yield import predict_yield_service
+# Initialize FastAPI
+app = FastAPI(title="AgroPulse Prediction API")
+
+
+
+
+def normalize(value, min_val, max_val):
+    if max_val == min_val:
+        return 0.5  # Avoid divide-by-zero; neutral score
+    return (value - min_val) / (max_val - min_val)
+
+
+
+
+#soil based recommendation
+# ==============================
+# Load Model and Encoders
+# ==============================
+MODEL_PATH = r"C:\Users\varsa\Agropulse\app\models\random_forest_crop_model.pkl"
+ENCODER_PATH = r"C:\Users\varsa\Agropulse\app\models\crop_recommendation.pkl"
+
+
+
+
+try:
+    crop_model = joblib.load(MODEL_PATH)
+    label_encoders = joblib.load(ENCODER_PATH)
+except Exception as e:
+    raise RuntimeError(f"Error loading model or encoders: {e}")
+
+
+
+
+
+
+
+
+# ==============================
+# Request Schema
+# ==============================
+class SoilCropRequest(BaseModel):
+    soil_type: str
+    soil_moisture: float
+    soil_ph: float
+    N: float
+    P: float
+    K: float
+    organic_carbon: float
+    texture: str
+    drainage: str
+    soil_health_index: float
+    previous_crop: str
+    acres: float
+
+
+
+
+
+
+
+
+# ==============================
+# Helper Functions
+# ==============================
+def safe_encode(encoder, value: str):
+    """Encode categorical value safely using a LabelEncoder."""
+    value = value.strip().lower()
+    classes = [cls.lower() for cls in encoder.classes_]
+    if value in classes:
+        idx = classes.index(value)
+        return encoder.transform([encoder.classes_[idx]])[0]
+    else:
+        # Unknown value: default to first known class
+        return encoder.transform([encoder.classes_[0]])[0]
+
+
+
+
+
+
+
+
+def preprocess_input(data, encoders):
+    """Encode all categorical columns and keep numeric as is."""
+    processed = []
+    for feature in [
+        "soil_type", "soil_moisture", "soil_ph", "N", "P", "K",
+        "organic_carbon", "texture", "drainage",
+        "soil_health_index", "previous_crop", "acres"
+    ]:
+        value = data[feature]
+        if feature in encoders:
+            encoded_value = safe_encode(encoders[feature], str(value))
+            processed.append(encoded_value)
+        else:
+            processed.append(float(value))
+    return np.array(processed).reshape(1, -1)
+
+
+
+
+
+
+
+
+# ==============================
+# Endpoint — Top 3 Crops
+# ==============================
+@app.post("/api/soil_score/")
+def get_soil_score(request: SoilCropRequest):
+    try:
+        input_data = request.dict()
+        X = preprocess_input(input_data, label_encoders)
+
+
+
+
+        # Predict probabilities for all crops
+        probabilities = crop_model.predict_proba(X)[0]
+
+
+
+
+        # Get encoded crop labels
+        encoded_labels = crop_model.classes_
+
+
+
+
+        # Decode crop names using the correct encoder
+        crop_names = label_encoders["recommended_crop"].inverse_transform(encoded_labels)
+
+
+
+
+        # Pair crops with probabilities
+        crop_scores = list(zip(crop_names, probabilities))
+
+
+
+
+        # Sort by score descending
+        sorted_crops = sorted(crop_scores, key=lambda x: x[1], reverse=True)
+
+
+
+
+        # Top 3
+        top_3 = sorted_crops[:3]
+
+
+
+
+        # Format response
+        result = [{"crop": crop, "score": round(float(score), 3)} for crop, score in top_3]
+
+
+
+
+        return {"recommended_crops": result, "status": "success"}
+
+
+
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Soil suitability scoring failed: {e}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# =====================================================
+# 🌦 Climate & Weather Suitability Model Endpoint
+# =====================================================
+import os
+import numpy as np
+import joblib
+from fastapi import HTTPException
+from pydantic import BaseModel
+
+
+
+
+# ==============================
+# Load Model and Encoders
+# ==============================
+MODEL_DIR = r"C:\Users\varsa\Agropulse\app\models"
+
+
+
+
+try:
+    gbr_model = joblib.load(os.path.join(MODEL_DIR, "gbr_crop_suitability.pkl"))
+    scaler = joblib.load(os.path.join(MODEL_DIR, "feature_scaler.pkl"))
+    ohe_season = joblib.load(os.path.join(MODEL_DIR, "season_ohe.pkl"))
+    le_season = joblib.load(os.path.join(MODEL_DIR, "season_encoder.pkl"))
+    print("✅ Climate suitability model loaded successfully!")
+except Exception as e:
+    raise RuntimeError(f"Error loading model or encoders: {e}")
+
+
+
+
+# ==============================
+# Crop–Season Mapping
+# ==============================
+target_crops = [
+    'paddy', 'maize', 'tur dal', 'green gram', 'tomato',
+    'onion', 'sugarcane', 'banana', 'coconut', 'groundnut'
+]
+
+
+
+
+crop_season_map = {
+    'paddy': 'kharif', 'maize': 'kharif', 'tur dal': 'rabi', 'green gram': 'rabi',
+    'tomato': 'summer', 'onion': 'rabi', 'sugarcane': 'year-round',
+    'banana': 'year-round', 'coconut': 'year-round', 'groundnut': 'kharif'
+}
+
+
+
+
+# ==============================
+# Request Schema
+# ==============================
+class ClimateRequest(BaseModel):
+    temperature: float
+    humidity: float
+    ph: float
+    rainfall: float
+
+
+
+
+# ==============================
+# Helper Function
+# ==============================
+def predict_all_crops_normalized(input_features: dict):
+    results = {}
+
+
+
+
+    for crop in target_crops:
+        try:
+            season_int = le_season.transform([crop_season_map[crop]])[0]
+            season_ohe_vec = ohe_season.transform([[season_int]])
+        except Exception:
+            continue
+
+
+
+
+        temp_array = np.hstack([
+            np.array([[input_features["temperature"],
+                       input_features["humidity"],
+                       input_features["ph"],
+                       input_features["rainfall"]]]),
+            season_ohe_vec
+        ])
+
+
+
+
+        temp_scaled = scaler.transform(temp_array)
+        score = gbr_model.predict(temp_scaled)[0]
+        results[crop] = max(0, score)
+
+
+
+
+    total = sum(results.values())
+    normalized_scores = {c: (s / total if total > 0 else 0) for c, s in results.items()}
+    return dict(sorted(normalized_scores.items(), key=lambda x: x[1], reverse=True))
+
+
+
+
+# ==============================
+# 🌾 Endpoint — Top 3 Crops
+# ==============================
+@app.post("/api/climate_suitability/")
+def get_climate_suitability(request: ClimateRequest):
+    try:
+        input_data = request.dict()
+        predictions = predict_all_crops_normalized(input_data)
+
+
+
+
+        # Top 3 crops
+        top_3 = list(predictions.items())[:3]
+        #result = [{"crop": crop, "score": round(float(score) * 100, 1)} for crop, score in top_3] scores :/10
+
+
+
+
+        result = [{"crop": crop, "score": round(float(score), 3)} for crop, score in top_3]
+
+
+
+
+        return {
+            "recommended_crops": result,
+            "status": "success"
+        }
+
+
+
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Climate suitability scoring failed: {e}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# -----------------------------
+# Paths
+# -----------------------------
+MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")  # app/models
+PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))  # one level up from app/
+DAILY_DIR = os.path.join(PROJECT_ROOT, "notebooks", "data", "processed", "crop_daily_avg")
+MONTHLY_DIR = os.path.join(PROJECT_ROOT, "notebooks", "data", "processed", "crop_monthly_avg")
+print("DAILY_DIR:", DAILY_DIR)
+print("MONTHLY_DIR:", MONTHLY_DIR)
+
+
+
+
+
+
+
+
+# -----------------------------
+# Load all models at startup
+# -----------------------------
+models = load_all_models(MODEL_DIR)
+print(f"✅ Loaded models: {list(models.keys())}")
+
+
+
+
+
+
+
+
+# ==============================
+# Endpoint 1: Next 7 days (daily)
+# ==============================
+@app.post("/predict_next_week")
+def predict_next_week(commodity: str):
+    commodity = commodity.lower()
+    model_key = f"{commodity}_lstm"  # daily model key
+
+
+
+
+    if model_key not in models:
+        raise HTTPException(status_code=404, detail=f"No daily model found for {commodity}")
+
+
+
+
+    csv_file = os.path.join(DAILY_DIR, f"{commodity}_daily.csv")
+    if not os.path.exists(csv_file):
+        raise HTTPException(status_code=404, detail=f"Daily CSV not found for {commodity}")
+
+
+
+
+    df = pd.read_csv(csv_file)
+
+
+
+
+    if "price_modal" not in df.columns:
+        raise HTTPException(status_code=400, detail=f"'price_modal' column missing in daily CSV for {commodity}")
+
+
+
+
+    forecast_df = predict_next_7_days(models[model_key]['model'], models[model_key]['scaler'], df)
+
+
+
+
+    return {
+        "commodity": commodity,
+        "next_7_days": forecast_df.to_dict(orient="records")
+    }
+
+
+
+
+# ==============================
+# Endpoint 3: Normalized Market Score (Next 3–6 Months)
+# ==============================
+@app.post("/market_score_monthly")
+def market_score_monthly(commodity: str, months: int = 3):
+    commodity = commodity.lower()
+    model_key = f"{commodity}_monthly_lstm"  # monthly model key
+
+
+
+
+    if model_key not in models:
+        raise HTTPException(status_code=404, detail=f"No monthly model found for {commodity}")
+
+
+
+
+    csv_file = os.path.join(MONTHLY_DIR, f"{commodity}_monthly.csv")
+    if not os.path.exists(csv_file):
+        raise HTTPException(status_code=404, detail=f"Monthly CSV not found for {commodity}")
+
+
+
+
+    df = pd.read_csv(csv_file)
+    if "month" not in df.columns or "price_modal" not in df.columns:
+        raise HTTPException(status_code=400, detail=f"'month' or 'price_modal' column missing in monthly CSV for {commodity}")
+
+
+
+
+    df['month'] = pd.to_datetime(df['month'], errors='coerce')
+    df = df.sort_values('month')
+
+
+
+
+    model_info = models[model_key]
+    model = model_info['model']
+    scaler = model_info['scaler']
+
+
+
+
+    window_size = model.input_shape[1]
+    if len(df) < window_size:
+        raise HTTPException(status_code=400, detail="Not enough monthly data to predict")
+
+
+
+
+    last_sequence = df['price_modal'].values[-window_size:]
+    predicted_prices = predict_next_months(model, scaler, last_sequence, forecast_horizon=months)
+
+
+
+
+    # Step 1: Compute metrics
+    avg_price = float(np.mean(predicted_prices))
+    volatility = float(np.std(predicted_prices))
+
+
+
+
+    # Step 2: Normalize to 0–1 scale
+    # You can adjust these min/max values dynamically or keep as global constants
+    MIN_PRICE, MAX_PRICE = 10, 200     # depends on your commodity range
+    MAX_VOLATILITY = 30                # max expected std deviation
+
+
+
+
+    def normalize(value, min_val, max_val):
+        if max_val == min_val:
+            return 0.5
+        return (value - min_val) / (max_val - min_val)
+
+
+
+
+    price_norm = normalize(avg_price, MIN_PRICE, MAX_PRICE)
+    volatility_norm = 1 - normalize(volatility, 0, MAX_VOLATILITY)
+
+
+
+
+    # Step 3: Weighted final score
+    market_score = round((0.7 * price_norm + 0.3 * volatility_norm), 3)
+
+
+
+
+    return {
+        "commodity": commodity,
+        "forecast_horizon_months": months,
+        "average_price": round(avg_price, 2),
+        "volatility": round(volatility, 2),
+        "market_score": market_score
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+# Define request schema with lowercase keys
+class YieldRequest(BaseModel):
+    location: str
+    crop: str
+    climate_suitability_score: float
+    soil_fitness_score: float
+    previous_crop: str
+    previous_yield: float
+    irrigation_method: str
+    planting_density: float
+    ndvi: float
+    evi: float
+    lai: float
+
+
+
+
+# ==============================
+# Endpoint: Predict Yield Score
+# ==============================
+@app.post("/api/predict_yield/")
+def predict_yield(request: YieldRequest):
+    """
+    Predicts yield (kg/ha) and converts it into a normalized yield score (0–1)
+    """
+    data = request.dict()
+    predicted_yield = predict_yield_service(data)
+
+
+
+
+    # Define your expected yield range — adjust these to match your region
+    MIN_YIELD, MAX_YIELD = 500, 8000  # kg/ha range for normalization
+    yield_score = round(normalize(predicted_yield, MIN_YIELD, MAX_YIELD), 3)
+
+
+
+
+    return {
+        "crop": data["crop"],
+        "predicted_yield_kg_ha": predicted_yield,
+        "yield_score": yield_score
+    }
+
+
+
+
+# ==============================
+# Endpoint 4: Financial picture / ROI using 3-month market forecast
+# ==============================
+@app.post("/predict_financials/")
+def calculate_financials(request: YieldRequest):
+    data = request.dict()
+    crop = data["crop"].capitalize()  # match JSON keys
+    acres = data.get("acres", 2.5)  # default 2.5 acres
+
+
+
+
+    # 0️⃣ Load crop cost data from JSON
+    COST_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "app", "data", "crop_costs.json")
+    if not os.path.exists(COST_FILE):
+        raise HTTPException(status_code=404, detail="Crop cost file not found")
+    with open(COST_FILE, "r") as f:
+        raw_cost_data = json.load(f).get(crop)
+    if not raw_cost_data:
+        raise HTTPException(status_code=404, detail=f"No cost data found for {crop}")
+
+
+
+
+    # 1️⃣ Predict yield (kg/ha)
+    predicted_yield_kg_ha = predict_yield_service(data)
+
+
+
+
+    # 2️⃣ Friendly cost labels
+    COST_LABELS = {
+        "seed_cost": "Seeds",
+        "fertilizer_cost": "Organic manure & bio-fertilizer",
+        "irrigation_cost": "Irrigation (canal + motor)",
+        "labour_cost": "Labour",
+        "transportation_cost": "Transport & Mandi fees",
+        "equipment_cost": "Equipment"
+    }
+    cost_data = {COST_LABELS.get(k, k): v for k, v in raw_cost_data.items()}
+    total_cost_per_acre = sum(cost_data.values())
+    total_cost_field = total_cost_per_acre * acres
+
+
+
+
+    # 3️⃣ Market price forecast (next 3 months)
+    model_key = f"{crop.lower()}_monthly_lstm"
+    monthly_csv = os.path.join(MONTHLY_DIR, f"{crop.lower()}_monthly.csv")
+
+
+
+
+    if model_key not in models or not os.path.exists(monthly_csv):
+        raise HTTPException(status_code=404, detail="Monthly price prediction data not found")
+
+
+
+
+    df_price = pd.read_csv(monthly_csv)
+    df_price['month'] = pd.to_datetime(df_price['month'], errors='coerce')
+    df_price = df_price.sort_values('month')
+
+
+
+
+    model_info = models[model_key]
+    model = model_info['model']
+    scaler = model_info['scaler']
+    window_size = model.input_shape[1]
+    last_sequence = df_price['price_modal'].values[-window_size:]
+    predicted_prices = predict_next_months(model, scaler, last_sequence, forecast_horizon=3)
+    market_price_per_kg = sum(predicted_prices) / len(predicted_prices)  # average
+
+
+
+
+    # 4️⃣ Convert yield
+    predicted_yield_kg_per_acre = predicted_yield_kg_ha / 2.471  # kg per acre
+    predicted_yield_kg_field = predicted_yield_kg_per_acre * acres  # total kg for field
+
+
+
+
+    predicted_yield_quintals_per_acre = predicted_yield_kg_per_acre / 100
+    predicted_yield_quintals_field = predicted_yield_kg_field / 100
+
+
+
+
+    # 5️⃣ Revenue, profit, ROI
+    revenue = predicted_yield_kg_field * market_price_per_kg
+    profit = revenue - total_cost_field
+    roi_percent = (profit / total_cost_field) * 100
+
+
+
+
+    # 6️⃣ Prepare output
+    financials = {
+        "Your financial picture": {
+            "Expense per acre": {k: f"₹{v:,.0f}" for k, v in cost_data.items()},
+            "Total Cost per acre": f"₹{total_cost_per_acre:,.0f}",
+            "Total Cost for field": f"₹{total_cost_field:,.0f}",
+            "Expected Yield per hectare": f"{predicted_yield_kg_ha / 100:,.1f} quintals",
+            "Expected Yield per acre": f"{predicted_yield_quintals_per_acre:,.1f} quintals",
+            "Expected Yield for field": f"{predicted_yield_quintals_field:,.1f} quintals",
+            "Market Price (avg 3 months)": f"₹{market_price_per_kg:,.0f} per kg",
+            "Expected Revenue": f"₹{revenue:,.0f}",
+            "Net Profit": f"₹{profit:,.0f} (~{roi_percent:,.0f}% ROI)"
+        }
+    }
+
+
+
+
+    return financials
+
+# ==============================
+# Endpoint: Final Recommendation
+# ==============================
+class FinalRequest(BaseModel):
+    soil_type: str
+    soil_moisture: float
+    soil_ph: float
+    N: float
+    P: float
+    K: float
+    organic_carbon: float
+    texture: str
+    drainage: str
+    soil_health_index: float
+    previous_crop: str
+    acres: float
+    temperature: float
+    humidity: float
+    ph: float
+    rainfall: float
+    location: str
+    irrigation_method: str
+    planting_density: float
+    ndvi: float
+    evi: float
+    lai: float
+
+@app.post("/api/final_recommendation/")
+def final_recommendation(request: FinalRequest):
+    try:
+        data = request.dict()
+        
+        # 1️⃣ Get top 3 crops from soil model
+        X = preprocess_input(data, label_encoders)
+        probabilities = crop_model.predict_proba(X)[0]
+        crop_names = label_encoders["recommended_crop"].inverse_transform(crop_model.classes_)
+        crop_scores = list(zip(crop_names, probabilities))
+        top_crops = sorted(crop_scores, key=lambda x: x[1], reverse=True)[:3]
+
+        final_results = []
+
+        for crop, soil_score in top_crops:
+            # ---- Climate score ----
+            climate_preds = predict_all_crops_normalized({
+                "temperature": data["temperature"],
+                "humidity": data["humidity"],
+                "ph": data["ph"],
+                "rainfall": data["rainfall"]
+            })
+            climate_score = climate_preds.get(crop, 0)
+
+            # ---- Yield score ----
+            yield_kg_ha = predict_yield_service({
+                "location": data["location"],
+                "crop": crop,
+                "climate_suitability_score": climate_score,
+                "soil_fitness_score": soil_score,
+                "previous_crop": data["previous_crop"],
+                "previous_yield": 0,
+                "irrigation_method": data["irrigation_method"],
+                "planting_density": data["planting_density"],
+                "ndvi": data["ndvi"],
+                "evi": data["evi"],
+                "lai": data["lai"]
+            })
+            yield_score = normalize(yield_kg_ha, 500, 8000)
+
+            # ---- Market score ----
+            model_key = f"{crop.lower()}_monthly_lstm"
+            monthly_csv = os.path.join(MONTHLY_DIR, f"{crop.lower()}_monthly.csv")
+            if model_key in models and os.path.exists(monthly_csv):
+                df_price = pd.read_csv(monthly_csv).sort_values('month')
+                last_seq = df_price['price_modal'].values[-models[model_key]['model'].input_shape[1]:]
+                predicted_prices = predict_next_months(models[model_key]['model'], models[model_key]['scaler'], last_seq, forecast_horizon=3)
+                avg_price = float(np.mean(predicted_prices))
+                market_score = normalize(avg_price, 10, 200)
+            else:
+                market_score = 0
+
+            # ---- ROI score ----
+            crop_cost_data = json.load(open(os.path.join(os.path.dirname(os.path.dirname(__file__)), "app", "data", "crop_costs.json"), "r")).get(crop.capitalize())
+            if crop_cost_data:
+                total_cost_per_acre = sum(crop_cost_data.values())
+                predicted_yield_kg_per_acre = yield_kg_ha / 2.471
+                predicted_yield_kg_field = predicted_yield_kg_per_acre * data["acres"]
+                market_price_per_kg = avg_price if 'avg_price' in locals() else 0
+                revenue = predicted_yield_kg_field * market_price_per_kg
+                profit = revenue - total_cost_per_acre * data["acres"]
+                roi_score = normalize(profit, 0, revenue*2)
+            else:
+                roi_score = 0
+
+            # ---- Final weighted score ----
+            final_score = round(0.25*soil_score + 0.25*climate_score + 0.25*yield_score + 0.125*market_score + 0.125*roi_score, 3)
+
+            final_results.append({
+                "crop": crop,
+                "soil_score": round(soil_score, 3),
+                "climate_score": round(climate_score, 3),
+                "yield_score": round(yield_score, 3),
+                "market_score": round(market_score, 3),
+                "roi_score": round(roi_score, 3),
+                "final_score": final_score
+            })
+
+        # Sort by final score descending
+        final_results = sorted(final_results, key=lambda x: x["final_score"], reverse=True)
+
+        return {"recommended_crops": final_results, "status": "success"}
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Final recommendation failed: {e}")

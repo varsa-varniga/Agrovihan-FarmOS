@@ -1,0 +1,20 @@
+# FastAPI core
+fastapi==0.115.0
+uvicorn==0.30.1
+
+# Data validation and environment handling
+pydantic==2.8.2
+python-multipart==0.0.9
+python-dotenv==1.0.1
+
+# Machine learning and data
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.5.1
+
+# Database ORM
+SQLAlchemy==2.0.31
+
+# Web scraping and external data fetching
+requests==2.32.3
+beautifulsoup4==4.12.3

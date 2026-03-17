@@ -1,0 +1,82 @@
+{
+  "Paddy": {
+    "seed_cost": 1300,
+    "fertilizer_cost": 2500,
+    "labour_cost": 4200,
+    "irrigation_cost": 1000,
+    "equipment_cost": 1300,
+    "transportation_cost": 700
+  },
+  "Maize": {
+    "seed_cost": 1100,
+    "fertilizer_cost": 1800,
+    "labour_cost": 3500,
+    "irrigation_cost": 900,
+    "equipment_cost": 900,
+    "transportation_cost": 600
+  },
+  "Coconut": {
+    "seed_cost": 800,
+    "fertilizer_cost": 2500,
+    "labour_cost": 3000,
+    "irrigation_cost": 700,
+    "equipment_cost": 1200,
+    "transportation_cost": 500
+  },
+  "Banana": {
+    "seed_cost": 4200,
+    "fertilizer_cost": 3500,
+    "labour_cost": 6500,
+    "irrigation_cost": 1200,
+    "equipment_cost": 1500,
+    "transportation_cost": 1000
+  },
+  "Tomato": {
+    "seed_cost": 1500,
+    "fertilizer_cost": 2800,
+    "labour_cost": 5000,
+    "irrigation_cost": 900,
+    "equipment_cost": 1100,
+    "transportation_cost": 700
+  },
+  "Onion": {
+    "seed_cost": 1600,
+    "fertilizer_cost": 2500,
+    "labour_cost": 4800,
+    "irrigation_cost": 800,
+    "equipment_cost": 1000,
+    "transportation_cost": 600
+  },
+  "Tur dal": {
+    "seed_cost": 1200,
+    "fertilizer_cost": 1600,
+    "labour_cost": 3000,
+    "irrigation_cost": 700,
+    "equipment_cost": 800,
+    "transportation_cost": 500
+  },
+  "Green gram": {
+    "seed_cost": 1000,
+    "fertilizer_cost": 1500,
+    "labour_cost": 2800,
+    "irrigation_cost": 700,
+    "equipment_cost": 700,
+    "transportation_cost": 400
+  },
+  "Sugarcane": {
+    "seed_cost": 3500,
+    "fertilizer_cost": 4000,
+    "labour_cost": 8000,
+    "irrigation_cost": 1500,
+    "equipment_cost": 1800,
+    "transportation_cost": 1000
+  },
+  "Groundnut": {
+    "seed_cost": 1300,
+    "fertilizer_cost": 2000,
+    "labour_cost": 3700,
+    "irrigation_cost": 800,
+    "equipment_cost": 1000,
+    "transportation_cost": 500
+  }
+}
