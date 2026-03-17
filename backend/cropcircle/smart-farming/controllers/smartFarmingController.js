@@ -125,4 +125,60 @@ const getPendingTasks = async (req, res) => {
   }
 };
 
-export { startCropPlan, getTodayTasks, completeTask, getPendingTasks };
+const getSeasonPlan = async (req, res) => {
+  try {
+    const { farmer_id } = req.params;
+    const farmerCrop = await FarmerCrop.findOne({ farmer_id });
+
+    if (!farmerCrop) {
+      return res.status(404).json({ message: "Farmer crop plan not found" });
+    }
+
+    const startDate = toDateOnly(farmerCrop.start_date);
+    const weeksMap = new Map();
+
+    farmerCrop.daily_tasks.forEach((task) => {
+      const taskDate = toDateOnly(task.date);
+      const diffDays = Math.floor(
+        (taskDate.getTime() - startDate.getTime()) / (24 * 60 * 60 * 1000)
+      );
+      const weekNumber = Math.floor(diffDays / 7) + 1;
+
+      if (!weeksMap.has(weekNumber)) {
+        weeksMap.set(weekNumber, {
+          week: weekNumber,
+          start_date: toDateKey(addDays(startDate, (weekNumber - 1) * 7)),
+          end_date: toDateKey(addDays(startDate, weekNumber * 7 - 1)),
+          tasks: [],
+        });
+      }
+
+      weeksMap.get(weekNumber).tasks.push({
+        task_name: task.task_name,
+        date: toDateKey(task.date),
+        completed: task.completed,
+        priority: task.priority,
+      });
+    });
+
+    const weeks = Array.from(weeksMap.values()).sort((a, b) => a.week - b.week);
+
+    return res.json({
+      farmer_id,
+      crop_name: farmerCrop.crop_name,
+      start_date: toDateKey(startDate),
+      total_weeks: weeks.length,
+      weeks,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+export {
+  startCropPlan,
+  getTodayTasks,
+  completeTask,
+  getPendingTasks,
+  getSeasonPlan,
+};

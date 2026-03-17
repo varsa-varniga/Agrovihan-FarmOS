@@ -1,6 +1,5 @@
 import React, { useMemo, useState } from "react";
 import {
-  Calendar,
   Leaf,
   ListChecks,
   AlertCircle,
@@ -32,10 +31,12 @@ const SmartFarmingDashboard = ({ onBackToDashboard }) => {
   });
   const [todayTasks, setTodayTasks] = useState([]);
   const [pendingTasks, setPendingTasks] = useState([]);
+  const [seasonPlan, setSeasonPlan] = useState(null);
   const [cropMeta, setCropMeta] = useState(null);
   const [loadingStart, setLoadingStart] = useState(false);
   const [loadingToday, setLoadingToday] = useState(false);
   const [loadingPending, setLoadingPending] = useState(false);
+  const [loadingPlan, setLoadingPlan] = useState(false);
   const [error, setError] = useState("");
 
   const todayKey = useMemo(() => toDateKey(new Date()), []);
@@ -58,7 +59,7 @@ const SmartFarmingDashboard = ({ onBackToDashboard }) => {
       }
       const data = await response.json();
       setCropMeta(data);
-      await Promise.all([loadTodayTasks(), loadPendingTasks()]);
+      await Promise.all([loadTodayTasks(), loadPendingTasks(), loadSeasonPlan()]);
     } catch (err) {
       setError(err.message || "Unable to start crop plan");
     } finally {
@@ -109,6 +110,27 @@ const SmartFarmingDashboard = ({ onBackToDashboard }) => {
     }
   };
 
+  const loadSeasonPlan = async () => {
+    if (!farmerId) return;
+    setLoadingPlan(true);
+    setError("");
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/smart-farming/plan/${encodeURIComponent(farmerId)}`
+      );
+      if (!response.ok) {
+        throw new Error("Failed to fetch season plan");
+      }
+      const data = await response.json();
+      setSeasonPlan(data);
+    } catch (err) {
+      setSeasonPlan(null);
+      setError(err.message || "Unable to load season plan");
+    } finally {
+      setLoadingPlan(false);
+    }
+  };
+
   const markComplete = async (task) => {
     setError("");
     try {
@@ -124,7 +146,7 @@ const SmartFarmingDashboard = ({ onBackToDashboard }) => {
       if (!response.ok) {
         throw new Error("Failed to mark task complete");
       }
-      await Promise.all([loadTodayTasks(), loadPendingTasks()]);
+      await Promise.all([loadTodayTasks(), loadPendingTasks(), loadSeasonPlan()]);
     } catch (err) {
       setError(err.message || "Unable to mark task complete");
     }
@@ -543,8 +565,10 @@ const SmartFarmingDashboard = ({ onBackToDashboard }) => {
               </p>
             </div>
             <button
-              onClick={() => Promise.all([loadTodayTasks(), loadPendingTasks()])}
-              disabled={loadingPending || loadingToday}
+              onClick={() =>
+                Promise.all([loadTodayTasks(), loadPendingTasks(), loadSeasonPlan()])
+              }
+              disabled={loadingPending || loadingToday || loadingPlan}
               style={{
                 padding: "10px 14px",
                 borderRadius: "12px",
@@ -553,7 +577,9 @@ const SmartFarmingDashboard = ({ onBackToDashboard }) => {
                 color: "#065f46",
                 fontWeight: 600,
                 cursor:
-                  loadingPending || loadingToday ? "not-allowed" : "pointer",
+                  loadingPending || loadingToday || loadingPlan
+                    ? "not-allowed"
+                    : "pointer",
                 display: "flex",
                 alignItems: "center",
                 gap: "8px",
@@ -636,6 +662,173 @@ const SmartFarmingDashboard = ({ onBackToDashboard }) => {
             </div>
           )}
         </div>
+      </div>
+
+      <div
+        style={{
+          maxWidth: "1200px",
+          margin: "32px auto 0",
+          backgroundColor: "white",
+          borderRadius: "24px",
+          padding: "26px",
+          boxShadow: "0 14px 40px rgba(15, 118, 110, 0.1)",
+          border: "1px solid rgba(13,148,136,0.08)",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "16px",
+            marginBottom: "20px",
+          }}
+        >
+          <div>
+            <h2
+              style={{
+                margin: 0,
+                fontSize: "20px",
+                color: "#064e3b",
+                fontWeight: 700,
+              }}
+            >
+              Overall Harvest Season Plan
+            </h2>
+            <p style={{ color: "#0f766e", margin: "6px 0 0" }}>
+              Full daily plan grouped by week for{" "}
+              {seasonPlan?.crop_name || "your crop"}.
+            </p>
+          </div>
+          <button
+            onClick={loadSeasonPlan}
+            disabled={loadingPlan}
+            style={{
+              padding: "10px 14px",
+              borderRadius: "12px",
+              border: "1px solid #bbf7d0",
+              backgroundColor: "#ecfdf5",
+              color: "#065f46",
+              fontWeight: 600,
+              cursor: loadingPlan ? "not-allowed" : "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+            }}
+          >
+            <RefreshCw size={16} />
+            Load Plan
+          </button>
+        </div>
+
+        {loadingPlan && (
+          <div
+            style={{
+              padding: "14px",
+              borderRadius: "12px",
+              backgroundColor: "#f0fdfa",
+              color: "#0f766e",
+              fontWeight: 600,
+            }}
+          >
+            Loading season plan...
+          </div>
+        )}
+
+        {!loadingPlan && !seasonPlan && (
+          <div
+            style={{
+              padding: "14px",
+              borderRadius: "12px",
+              backgroundColor: "#fef2f2",
+              color: "#b91c1c",
+              fontWeight: 600,
+            }}
+          >
+            Start a plan to view the full season schedule.
+          </div>
+        )}
+
+        {!loadingPlan && seasonPlan?.weeks?.length > 0 && (
+          <div style={{ display: "grid", gap: "12px" }}>
+            {seasonPlan.weeks.map((week) => (
+              <details
+                key={week.week}
+                style={{
+                  backgroundColor: "#f8fafc",
+                  borderRadius: "14px",
+                  border: "1px solid #e2e8f0",
+                  padding: "12px 16px",
+                }}
+              >
+                <summary
+                  style={{
+                    cursor: "pointer",
+                    listStyle: "none",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "10px",
+                    fontWeight: 700,
+                    color: "#0f766e",
+                  }}
+                >
+                  <ListChecks size={18} />
+                  Week {week.week}
+                  <span
+                    style={{
+                      marginLeft: "auto",
+                      fontSize: "12px",
+                      color: "#64748b",
+                    }}
+                  >
+                    {week.start_date} - {week.end_date}
+                  </span>
+                </summary>
+                <div style={{ marginTop: "12px", display: "grid", gap: "8px" }}>
+                  {week.tasks.map((task, index) => (
+                    <div
+                      key={`${task.task_name}-${index}`}
+                      style={{
+                        display: "flex",
+                        flexWrap: "wrap",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: "10px",
+                        padding: "10px 12px",
+                        borderRadius: "12px",
+                        backgroundColor: "white",
+                        border: "1px solid #e2e8f0",
+                      }}
+                    >
+                      <div>
+                        <div style={{ color: "#0f172a", fontWeight: 600 }}>
+                          {task.task_name}
+                        </div>
+                        <div style={{ fontSize: "12px", color: "#64748b" }}>
+                          {task.date}
+                        </div>
+                      </div>
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "8px",
+                          fontSize: "12px",
+                          fontWeight: 600,
+                          color: task.completed ? "#16a34a" : "#0f766e",
+                        }}
+                      >
+                        <span>Priority {task.priority}</span>
+                        <span>•</span>
+                        <span>{task.completed ? "Completed" : "Pending"}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            ))}
+          </div>
+        )}
       </div>
 
       <style>
