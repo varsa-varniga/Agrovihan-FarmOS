@@ -493,4 +493,4 @@ const cropSchedules = {
   },
 };
 
-module.exports = cropSchedules;
+export default cropSchedules;

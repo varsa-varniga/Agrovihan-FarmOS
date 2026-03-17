@@ -17,6 +17,9 @@ import availabilityRoutes from "./routes/availabilityRoutes.js";
 import farmProfileRoutes from "./routes/farmProfileRoutes.js";
 import aggregatorRoutes from './routes/aggregatorRoutes.js';
 import carbonRoutes from './routes/carbonRoutes.js';
+import cropScheduleRoutes from "./routes/cropScheduleRoutes.js";
+import smartFarmingRoutes from "../smart-farming/routes/smartFarmingRoutes.js";
+import { startDailyTaskReminder } from "../smart-farming/utils/reminderScheduler.js";
 
 import path from "path";
 
@@ -62,6 +65,8 @@ app.use("/api/farm-profile", farmProfileRoutes);
 app.use("/api/aggregator", aggregatorRoutes);
 app.use("/api/carbon", carbonRoutes);
 app.use("/api/satellite", satelliteRoutes);
+app.use("/api/crop-schedules", cropScheduleRoutes);
+app.use("/api/smart-farming", smartFarmingRoutes);
 
 // Test route
 app.get("/", (req, res) => res.send("🌾 Crop Circles Backend Running Smoothly"));
@@ -71,3 +76,5 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () =>
   console.log(`🚀 Server running on port ${PORT}`)
 );
+
+startDailyTaskReminder();
